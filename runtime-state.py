@@ -124,7 +124,7 @@ def stop_child(child):
     child.wait()
 
 
-def run(command, seconds, consume):
+def run(command, seconds, consume, limit=LIMIT):
     child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                              start_new_session=True)
     deadline = time.monotonic() + seconds
@@ -141,13 +141,26 @@ def run(command, seconds, consume):
                         selector.unregister(key.fileobj)
                         continue
                     total += len(chunk)
-                    if total > LIMIT:
+                    if total > limit:
                         raise ValueError("process output exceeds limit")
                     consume(chunk)
             return child.wait(timeout=max(0.1, deadline - time.monotonic()))
     finally:
         stop_child(child)
         child.stdout.close()
+
+
+PASTE_LIMIT = 4096
+
+def paste_text():
+    """Bounded clipboard read: a hostile owner can stream forever or never send EOF."""
+    output = bytearray()
+    try:
+        run(["wl-paste", "--type", "text", "--no-newline"], 1, output.extend, limit=PASTE_LIMIT)
+    except (ValueError, TimeoutError, subprocess.SubprocessError):
+        pass  # over the cap or stalled: keep the bounded prefix that already arrived
+    text = output.decode("utf-8", "replace")[:PASTE_LIMIT]
+    return re.sub(r"[\x00-\x1f\x7f]+", " ", text)
 
 
 def emit(data):
@@ -254,6 +267,26 @@ def review_repository(url):
     return result
 
 
+REOPEN_VIEW_FIELDS = {"scrollY": (int, float), "searchText": str, "filterMode": int, "filterKind": str}
+
+
+def reopen_view(args):
+    """The panel's scroll position, search and filters, kept across a shell rebuild.
+    Unknown fields and wrong types are dropped; a bad value never stops the reopen."""
+    try:
+        parsed = json.loads(args[0]) if args else {}
+    except ValueError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    view = {}
+    for key, kind in REOPEN_VIEW_FIELDS.items():
+        value = parsed.get(key)
+        if isinstance(value, kind) and not isinstance(value, bool):
+            view[key] = value[:256] if isinstance(value, str) else value
+    return view
+
+
 def main():
     os.umask(0o077)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
@@ -263,6 +296,9 @@ def main():
         return 0
     if action == "update":
         return update(args[0], args[1], args[2:])
+    if action == "paste":
+        sys.stdout.buffer.write(paste_text().encode("utf-8"))
+        return 0
     with contextlib.closing(PrivateDirectory(state_root())) as store:
         if action in ("check", "check-manual"):
             return check_plugins(args[0], store, action == "check")
@@ -273,7 +309,7 @@ def main():
         elif action == "reopen-write":
             if args[0] not in ("layout", "main"):
                 raise ValueError("invalid reopen page")
-            store.write("reopen.status", json.dumps({"page": args[0], "time": time.time()}).encode())
+            store.write("reopen.status", json.dumps({"page": args[0], "time": time.time(), "view": reopen_view(args[1:])}).encode())
         elif action == "reopen-read":
             with store.lock("reopen.flock"):
                 data = json.loads(store.read("reopen.status"))
@@ -281,6 +317,17 @@ def main():
                 if time.time() - data["time"] > 10:
                     return 1
                 print(data["page"])
+                print(json.dumps(data.get("view", {})))
+        elif action == "reopen-pending":
+            # Non-consuming check: a freshly rebuilt widget asks whether the
+            # panel must be loaded now so it can consume the flag itself.
+            with store.lock("reopen.flock"):
+                try:
+                    data = json.loads(store.read("reopen.status"))
+                except FileNotFoundError:
+                    return 1
+                if time.time() - data["time"] > 10:
+                    return 1
         elif action != "read":
             raise ValueError("unknown action")
     return 0

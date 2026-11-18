@@ -26,6 +26,14 @@ if [[ $action == disable ]]; then
     [[ -n $host ]] || continue
     omarchy bar set "$host" "$key" "$(base64 -d <<< "$children")" --json
   done <<< "$changes"
+  if jq -e --arg id "$id" '
+    [((.bar.pluginFolder.widgets // []) | if type == "array" then . else [] end)[]
+      | if type == "object" then .id else . end]
+    | index($id) != null
+  ' <<< "$config" >/dev/null; then
+    helper=$(dirname -- "${BASH_SOURCE[0]}")/plugin-folder-layout.py
+    python3 "$helper" "$id" remove 0
+  fi
   exec omarchy plugin disable "$id"
 fi
 

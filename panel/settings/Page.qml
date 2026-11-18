@@ -4,9 +4,10 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
-Rectangle {
+Item {
   id: page
   required property bool open
   required property real topInset
@@ -30,7 +31,6 @@ Rectangle {
   signal openUrlRequested(string url)
 
   visible: open
-  color: panelBackground
   onOpenChanged: if (open) settingsKeys.forceActiveFocus()
 
   MouseArea { anchors.fill: parent }
@@ -60,7 +60,7 @@ Rectangle {
       Button {
         text: "Back"
         foreground: page.foreground
-        accent: Color.accent
+        accent: Commons.Color.accent
         fontFamily: page.fontFamily
         fontSize: Style.font.bodySmall
         onClicked: page.closeRequested()
@@ -74,7 +74,7 @@ Rectangle {
       checked: page.menuEnabled
       enabled: !page.menuBusy
       foreground: page.foreground
-      accent: Color.accent
+      accent: Commons.Color.accent
       fontFamily: page.fontFamily
       onClicked: page.menuEnabledRequested(!page.menuEnabled)
     }
@@ -95,7 +95,7 @@ Rectangle {
       checked: page.autoCheckEnabled
       enabled: !page.settingsBusy
       foreground: page.foreground
-      accent: Color.accent
+      accent: Commons.Color.accent
       fontFamily: page.fontFamily
       onClicked: page.autoCheckEnabledRequested(!page.autoCheckEnabled)
     }
@@ -107,7 +107,7 @@ Rectangle {
       })
       value: String(page.autoCheckIntervalHours)
       foreground: page.foreground
-      accent: Color.accent
+      accent: Commons.Color.accent
       fontFamily: page.fontFamily
       fontSize: Style.font.caption
       onChanged: function(value) { page.autoCheckIntervalRequested(Number(value)) }
@@ -126,7 +126,7 @@ Rectangle {
       foreground: page.foreground
       background: page.panelBackground
       popupBorder: Util.alpha(page.foreground, 0.2)
-      accent: Color.accent
+      accent: Commons.Color.accent
       fontFamily: page.fontFamily
       onChanged: function(value) { page.bulkUpdateScopeRequested(value) }
     }
@@ -153,7 +153,7 @@ Rectangle {
       Button {
         text: "Release notes"
         foreground: page.foreground
-        accent: Color.accent
+        accent: Commons.Color.accent
         fontFamily: page.fontFamily
         fontSize: Style.font.caption
         onClicked: page.openUrlRequested("https://github.com/fross100/omaplug/releases/tag/v" + encodeURIComponent(page.pluginVersion))

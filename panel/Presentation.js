@@ -39,6 +39,25 @@ function compareUrl(repoUrl, fromSha, toSha) {
   return url + "/compare/" + from + "..." + to
 }
 
+// Catalog release links are remote input and go straight to the browser, so
+// only https GitHub URLs are eligible.
+function releaseUrl(url) {
+  var value = String(url || "").trim()
+  if (value.length > 512) return ""
+  return /^https:\/\/github\.com\/[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*\/[^\s"'<>]*$/.test(value)
+    ? value : ""
+}
+
+// Qt's attached ToolTip text is AutoText, so manifest-derived text must reach
+// it markup-free or an <img> tag loads a remote resource on hover. Stray angle
+// brackets go too: Qt only treats text as rich if it can find a tag.
+function tooltipText(value) {
+  return String(value || "")
+    .replace(/<[^>]*>/g, "")
+    .replace(/[<>\u0000-\u001f\u007f]/g, " ")
+    .slice(0, 512)
+}
+
 function kindLabel(kinds, knownKinds) {
   if (!kinds) return ""
   var parts = String(kinds).split(",")

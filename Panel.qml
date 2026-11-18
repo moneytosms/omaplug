@@ -6,6 +6,7 @@ import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "panel/Presentation.js" as Presentation
 import "panel/dialogs" as Dialogs
@@ -28,10 +29,10 @@ Panel {
   property var hostWidget: null
   readonly property var barIdentity: hostWidget || root
 
-  readonly property color contentForeground: bar ? bar.foreground : Color.foreground
+  readonly property color contentForeground: bar ? bar.foreground : Commons.Color.foreground
   readonly property string contentFontFamily: bar ? bar.fontFamily : Style.font.family
   // Overlays cover the popup's own card, so they match the popup background.
-  readonly property color panelBackground: Color.popups.background
+  readonly property color panelBackground: Commons.Color.popups.background
   readonly property string pluginVersion: {
     for (var i = 0; i < root.pluginRows.length; i++) {
       if (String(root.pluginRows[i].id || "") === root.moduleName)
@@ -109,8 +110,8 @@ Panel {
   // from the installed commit to the latest observed upstream commit.
   function whatsNewUrlFor(sourceKey, id) {
     var entry = root.marketplaceEntry(String(id))
-    if (entry && typeof entry.releaseUrl === "string" && entry.releaseUrl !== "")
-      return entry.releaseUrl
+    var release = Presentation.releaseUrl(entry && entry.releaseUrl)
+    if (release !== "") return release
     var local = root.pluginCommits[String(sourceKey)] || ""
     var upstream = (entry && typeof entry.upstreamCommit === "string") ? entry.upstreamCommit : ""
     return root.compareUrlFor(sourceKey, local, upstream)
@@ -202,6 +203,41 @@ Panel {
     root.updateCheckRows, root.updateStates, root.marketplaceFetchFailed ? ({}) : root.marketplaceMap, root.bulkUpdateScope, root.incomingCommits)
   readonly property string bulkUpdateLabel: root.bulkUpdateScope === "verified"
     ? "Update verified" : root.bulkUpdateScope === "pending" ? "Update verified + pending" : "Update all"
+
+  // ---- "Update All" button (status row, right edge). The glyph renders via
+  // iconText so it can spin on its own while checking; the text property
+  // below carries no glyph. Scope-aware: label, tooltip, enabled state and
+  // action all follow bulkUpdateKeys, which Presentation.bulkUpdateKeys()
+  // already filters by bulkUpdateScope. The bulk button on the Updates page
+  // is gated on `pendingCount > 0`, so a freshly opened panel that has not
+  // checked yet would otherwise show no sign the feature exists at all.
+  readonly property bool updateCheckHasRun: Object.keys(root.updateStates).length > 0
+  readonly property bool bulkUpdateReady: root.bulkUpdateScope === "all" || !root.marketplaceFetching
+  readonly property string updateAllHeaderText: root.updateDetachedRunning ? "Updating\u2026"
+    : root.checkingUpdates || !root.bulkUpdateReady ? "Checking\u2026"
+    : root.bulkUpdateKeys.length > 0 ? root.bulkUpdateLabel + " (" + root.bulkUpdateKeys.length + ")"
+    : root.updateCheckHasRun ? "Up to date"
+    : "Check for updates"
+  readonly property string updateAllHeaderTooltip: root.updateDetachedRunning
+    ? "An update run is already in progress"
+    : root.checkingUpdates || !root.bulkUpdateReady ? "Checking every installed plugin for updates\u2026"
+    : root.bulkUpdateKeys.length > 0
+      ? "Update " + root.bulkUpdateKeys.length + " plugin source(s) under the current '" + root.bulkUpdateLabel + "' scope"
+      : root.updateCheckHasRun
+        ? (root.pendingUpdateCount > root.bulkUpdateKeys.length
+          ? "Updates exist outside the current '" + root.bulkUpdateLabel + "' scope"
+          : "Every installed plugin is already current")
+        : "Check every installed plugin for updates"
+
+  // updateAll() has nothing to act on until a check has populated the bulk
+  // keys, so the first press checks and shows the result rather than silently
+  // updating a pile of plugins the user has not laid eyes on yet.
+  function updateEverything() {
+    root.updatesPageOpen = true
+    if (root.checkingUpdates || root.updateDetachedRunning) return
+    if (root.bulkUpdateKeys.length > 0) root.updateAll()
+    else if (!root.updateCheckHasRun) root.checkUpdates()
+  }
 
   function persistAutoCheckSetting(values) {
     if (autoCheckSettingsProcess.running) return
@@ -551,6 +587,7 @@ Panel {
       || String(p.description || "").toLowerCase().indexOf(q) !== -1
       || String(p.id || "").toLowerCase().indexOf(q) !== -1
       || String(p.author || "").toLowerCase().indexOf(q) !== -1
+      || String(p.basedOnAuthor || "").toLowerCase().indexOf(q) !== -1
       || String(p.kinds || "").toLowerCase().indexOf(q) !== -1
   })
 
@@ -881,14 +918,14 @@ Panel {
   function updateAll() {
     if (root.checkingUpdates || root.updateDetachedRunning) return
     if (root.bulkUpdateScope !== "all" && root.marketplaceFetching) return
-    root.startDetachedUpdates(root.bulkUpdateKeys.slice())
+    root.startDetachedUpdates(root.bulkUpdateKeys.slice(), root.bulkUpdateScope !== "all")
   }
 
   // Launch only the repositories proven updateable by the preceding check.
   // The helper is detached because the first successful merge makes Omarchy
   // unload this panel; progress lives at a stable runtime path so the newly
   // loaded instance can reconnect to the same job.
-  function startDetachedUpdates(ids) {
+  function startDetachedUpdates(ids, pin) {
     if (!ids || ids.length === 0 || root.checkingUpdates || root.updateDetachedRunning) return
     if (root.updateRunnerPath === "" || root.updateStatusPath === "") {
       root.updateSummary = "Update helper not found"
@@ -907,7 +944,12 @@ Panel {
       : "Updating 0 of " + ids.length + "…"
 
     var launch = [root.updateRunnerPath, root.updateStatusPath, root.updateExpectedJobId]
-    for (var i = 0; i < ids.length; i++) launch.push(ids[i])
+    for (var i = 0; i < ids.length; i++) {
+      // A verified/pending batch is pinned to the exact commit the check saw;
+      // the helper installs that SHA, never a re-fetched upstream HEAD.
+      var commit = pin ? String(root.incomingCommits[ids[i]] || "") : ""
+      launch.push(/^[0-9a-f]{40}$/.test(commit) ? ids[i] + "@" + commit : ids[i])
+    }
     try {
       Quickshell.execDetached(launch)
     } catch (e) {
@@ -1030,8 +1072,8 @@ Panel {
     root.updateSummary = message || "Update interrupted. Check again."
   }
 
-  // Fetches the public marketplace catalog (capped at 2 MB like every other
-  // retained output) and builds the id -> {verified} map.
+  // Fetches the public marketplace catalog (size-capped by the helper) and
+  // builds the id -> {verified} map.
   function fetchMarketplace() {
     if (root.marketplaceFetching || root.marketplaceHelperPath === "") return
     root.marketplaceFetching = true
@@ -1070,7 +1112,8 @@ Panel {
         }
       }
     } catch (e) {
-      console.log("marketplace catalog parse failed:", e)
+      root.marketplaceFetchFailed = true
+      console.warn("marketplace catalog parse failed:", e)
       return
     }
     root.marketplaceMap = map
@@ -1089,6 +1132,8 @@ Panel {
         version: row.version !== "unknown" ? row.version : (item.version || "unknown"),
         author: row.author || item.author || "",
         description: row.description || item.description || "",
+        basedOnAuthor: row.basedOnAuthor || "",
+        basedOnUrl: row.basedOnUrl || "",
         kinds: row.kinds,
         canDisable: row.canDisable,
         firstParty: row.firstParty,
@@ -1106,7 +1151,10 @@ Panel {
       if (exitCode !== 0) {
         root.marketplaceFetching = false
         root.marketplaceFetchFailed = true
-        console.log("marketplace catalog fetch failed, exit code:", exitCode)
+        if (exitCode === 63)
+          console.warn("marketplace catalog fetch failed: catalog exceeded the 64 MiB fetch cap (exit 63)")
+        else
+          console.warn("marketplace catalog fetch failed, exit code:", exitCode)
         return
       }
       root.applyMarketplaceCatalog(marketplaceStdout.text)
@@ -1469,10 +1517,21 @@ Panel {
     }
   }
 
+  function parseCommandJson(text) {
+    var output = String(text || "")
+    var lines = output.split(/\r?\n/)
+    for (var i = 0; i < lines.length; i++) {
+      if (/^[\[{]/.test(lines[i].trim()))
+        return JSON.parse(lines.slice(i).join("\n"))
+    }
+    return JSON.parse(output)
+  }
+
   function applyPluginConfig(text) {
     var config = {}
-    try { config = JSON.parse(String(text || "{}")) } catch (e) { return }
-    var nested = {}
+    try { config = root.parseCommandJson(text || "{}") }
+    catch (e) { console.warn("Could not parse omarchy shell config:", e); return }
+    var nested = Object.create(null)
     var layout = config.bar && config.bar.layout ? config.bar.layout : {}
     for (var section in layout) {
       var entries = Array.isArray(layout[section]) ? layout[section] : []
@@ -1487,12 +1546,19 @@ Panel {
         }
       }
     }
+    var folderWidgets = config.bar && config.bar.pluginFolder
+      && Array.isArray(config.bar.pluginFolder.widgets) ? config.bar.pluginFolder.widgets : []
+    for (var k = 0; k < folderWidgets.length; k++) {
+      var folderId = folderWidgets[k] && typeof folderWidgets[k] === "object"
+        ? folderWidgets[k].id : folderWidgets[k]
+      if (folderId) nested[String(folderId)] = true
+    }
     root.nestedWidgetIds = nested
   }
 
   function applyPluginList(text) {
     var catalog
-    try { catalog = JSON.parse(String(text || "")) }
+    try { catalog = root.parseCommandJson(text) }
     catch (e) {
       console.warn("Could not parse omarchy plugin list:", e)
       pluginRows = []
@@ -1515,6 +1581,8 @@ Panel {
         version: "unknown",
         author: "",
         description: "",
+        basedOnAuthor: "",
+        basedOnUrl: "",
         kinds: kinds.join(", "),
         canDisable: !isBarOption,
         firstParty: m.firstParty === true,
@@ -1538,11 +1606,21 @@ Panel {
       + "firstParty=false; [[ \"$base\" == \"$0/shell/plugins\" ]] && firstParty=true; "
       + "find -L \"$base\" -maxdepth 4 -type f '(' -name manifest.json -o -name '*.manifest.json' ')' -print0 "
       + "| while IFS= read -r -d '' file; do jq -c --argjson firstParty \"$firstParty\" "
-      + "'{id,name,version,author,description,kinds,firstParty:$firstParty}' \"$file\"; done; "
+      + "'{id,name,version,author,description,kinds,firstParty:$firstParty,basedOn:(.basedOn // null)}' \"$file\"; done; "
       + "done",
       Quickshell.env("OMARCHY_PATH")]
     root.pluginManifestProcess.running = true
     root.scanPluginRepos()
+  }
+
+  // Optional fork attribution: { "author": "...", "url": "https://github.com/..." }.
+  function basedOnFields(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      return { basedOnAuthor: "", basedOnUrl: "" }
+    return {
+      basedOnAuthor: typeof value.author === "string" ? value.author.trim().slice(0, 128) : "",
+      basedOnUrl: typeof value.url === "string" ? value.url.trim().slice(0, 512) : ""
+    }
   }
 
   function applyPluginMetadata(text) {
@@ -1559,12 +1637,15 @@ Panel {
       for (var id in metadata) {
         var fallback = metadata[id]
         var fallbackKinds = Array.isArray(fallback.kinds) ? fallback.kinds : []
+        var fallbackBasedOn = root.basedOnFields(fallback.basedOn)
         rows.push({
           id: id,
           name: fallback.name || id,
           version: fallback.version || "unknown",
           author: fallback.author || "",
           description: fallback.description || "",
+          basedOnAuthor: fallbackBasedOn.basedOnAuthor,
+          basedOnUrl: fallbackBasedOn.basedOnUrl,
           kinds: fallbackKinds.join(", "),
           canDisable: fallbackKinds.indexOf("bar") === -1,
           firstParty: fallback.firstParty === true,
@@ -1582,12 +1663,15 @@ Panel {
         rows.push(row)
         continue
       }
+      var basedOn = root.basedOnFields(item.basedOn)
       rows.push({
         id: row.id,
         name: item.name || row.name,
         version: item.version || row.version,
         author: item.author || row.author,
         description: item.description || row.description,
+        basedOnAuthor: basedOn.basedOnAuthor || row.basedOnAuthor || "",
+        basedOnUrl: basedOn.basedOnUrl || row.basedOnUrl || "",
         kinds: Array.isArray(item.kinds) ? item.kinds.join(", ") : row.kinds,
         canDisable: row.canDisable,
         firstParty: row.firstParty,
@@ -1627,7 +1711,7 @@ Panel {
   // drives enable/disable through `omarchy plugin …` subprocesses, so move
   // follows the same pattern with `omarchy bar move` instead of touching
   // the shell registry (which user panels no longer reach).
-  property var barLayoutCache: ({ left: [], center: [], right: [] })
+  property var barLayoutCache: ({ left: [], center: [], right: [], folder: [] })
   property Process barLayoutProcess: Process {
     onExited: function(exitCode) {
       if (exitCode === 0) root.applyBarLayout(barLayoutStdout.text)
@@ -1655,6 +1739,19 @@ Panel {
     }
   }
   property string movePending: ""
+  property string folderLayoutHelperPath: ""
+
+  property Process folderMoveProcess: Process {
+    onExited: function(exitCode) {
+      var err = String(folderMoveStdout.text || "").trim()
+      if (exitCode !== 0) root.moveSummary = "Move failed" + (err ? ": " + err : "")
+      else if (root.movePending !== "") root.moveSummary = "Moved " + root.movePending + "."
+      root.movePending = ""
+      root.refreshBarLayout()
+      root.refreshPlugins()
+    }
+    stdout: StdioCollector { id: folderMoveStdout; waitForEnd: true }
+  }
 
   function refreshBarLayout() {
     if (root.barLayoutProcess.running) return
@@ -1671,7 +1768,7 @@ Panel {
       return
     }
     var layout = config && config.bar ? config.bar.layout : null
-    var next = { left: [], center: [], right: [] }
+    var next = { left: [], center: [], right: [], folder: [] }
     var sections = ["left", "center", "right"]
     for (var s = 0; s < sections.length; s++) {
       var entries = layout && Array.isArray(layout[sections[s]]) ? layout[sections[s]] : []
@@ -1683,13 +1780,20 @@ Panel {
       }
       next[sections[s]] = ids
     }
+    var folder = config && config.bar && config.bar.pluginFolder
+      && Array.isArray(config.bar.pluginFolder.widgets) ? config.bar.pluginFolder.widgets : []
+    for (var f = 0; f < folder.length; f++) {
+      var entry = folder[f]
+      var id = entry && typeof entry === "object" ? entry.id : entry
+      if (id) next.folder.push(String(id))
+    }
     root.barLayoutCache = next
   }
 
   // Move state for the row-menu "Move to" actions. Only bar-widgets that are
   // currently on the bar can move; anything else hides the menu entries.
   function barSectionFor(id) {
-    var sections = ["left", "center", "right"]
+    var sections = ["left", "center", "right", "folder"]
     for (var s = 0; s < sections.length; s++) {
       var ids = root.barLayoutCache[sections[s]] || []
       if (ids.indexOf(String(id)) !== -1) return sections[s]
@@ -1715,8 +1819,13 @@ Panel {
   }
 
   function moveWidgetToSection(id, section) {
-    if (["left", "center", "right"].indexOf(section) === -1) return
-    if (root.barMoveProcess.running) return
+    if (["left", "center", "right", "folder"].indexOf(section) === -1) return
+    if (section === "folder" || root.barSectionFor(id) === "folder") {
+      var targetIndex = section === "folder" ? (root.barLayoutCache.folder || []).length : 0
+      root.moveWidgetToPosition(id, section, targetIndex)
+      return
+    }
+    if (root.barMoveProcess.running || root.folderMoveProcess.running) return
     if (root.barSectionFor(id) === section) return
     root.keepOpenAcrossRebuild()
     root.movePending = id + " to " + section
@@ -1726,12 +1835,17 @@ Panel {
   }
 
   function moveWidgetToPosition(id, section, index) {
-    if (["left", "center", "right"].indexOf(section) === -1) return
-    if (root.barMoveProcess.running) return
+    if (["left", "center", "right", "folder"].indexOf(section) === -1) return
+    if (root.barMoveProcess.running || root.folderMoveProcess.running) return
     root.keepOpenAcrossRebuild()
     var target = Math.max(0, Math.floor(Number(index) || 0))
     root.movePending = id + " to " + section
     root.moveSummary = "Moving " + id + "…"
+    if (section === "folder" || root.barSectionFor(id) === "folder") {
+      root.folderMoveProcess.command = ["python3", root.folderLayoutHelperPath, id, section, String(target)]
+      root.folderMoveProcess.running = true
+      return
+    }
     root.barMoveProcess.command = ["omarchy", "bar", "move", id, "--section", section, "--index", String(target)]
     root.barMoveProcess.running = true
   }
@@ -1739,7 +1853,7 @@ Panel {
   // Live bar layout grouped per section for the layout board.
   function layoutSections() {
     var out = []
-    var sections = ["left", "center", "right"]
+    var sections = ["left", "center", "right", "folder"]
     for (var s = 0; s < sections.length; s++) {
       var ids = root.barLayoutCache[sections[s]] || []
       var items = []
@@ -1756,9 +1870,12 @@ Panel {
     root.marketplaceHelperPath = String(Qt.resolvedUrl("marketplace-catalog.sh")).replace(/^file:\/\//, "")
     root.updateHelperPath = String(Qt.resolvedUrl("plugin-state.sh")).replace(/^file:\/\//, "")
     root.updateRunnerPath = String(Qt.resolvedUrl("update-helper.sh")).replace(/^file:\/\//, "")
+    root.folderLayoutHelperPath = String(Qt.resolvedUrl("plugin-folder-layout.py")).replace(/^file:\/\//, "")
     root.autoCheckCoordinatorPath = String(Qt.resolvedUrl("auto-check-coordinator.sh")).replace(/^file:\/\//, "")
-    refreshPlugins()
-    fetchMarketplace()
+    // The plugin list and marketplace catalog are not loaded here: the bar
+    // builds one hidden instance of this panel per monitor at shell start,
+    // and open() loads both anyway. The update badge only needs the status
+    // files below, so nothing visible depends on pre-warming.
     Qt.callLater(function() { updateStatusFile.reload(); installStatusFile.reload() })
     // A toggle/move/remove rewrites shell.json, and the bar rebuilds every
     // widget on every monitor in response — including this panel's own
@@ -1773,7 +1890,13 @@ Panel {
   // rebuild, and the shell object rejects dynamic properties.
   function keepOpenAcrossRebuild() {
     keepOpenFlagWrite.command = ["python3", root.runtimeStatePath, "reopen-write",
-      root.layoutPageOpen ? "layout" : "main"]
+      root.layoutPageOpen ? "layout" : "main",
+      JSON.stringify({
+        scrollY: pluginList.contentY,
+        searchText: root.searchText,
+        filterMode: root.filterMode,
+        filterKind: root.filterKind
+      })]
     keepOpenFlagWrite.running = true
   }
 
@@ -1791,10 +1914,18 @@ Panel {
     onExited: function(exitCode) {
       if (exitCode === 0) {
         keepOpenRetries = 0
-        var restoreLayout = String(keepOpenState.text).trim() === "layout"
+        var lines = String(keepOpenState.text).split("\n")
+        var restoreLayout = lines[0].trim() === "layout"
+        var view = {}
+        try { view = JSON.parse(lines[1] || "{}") } catch (e) {}
         Qt.callLater(function() {
+          if (typeof view.filterMode === "number") root.filterMode = view.filterMode
+          if (typeof view.filterKind === "string") root.filterKind = view.filterKind
+          if (typeof view.searchText === "string") root.searchText = view.searchText
+          root.pendingScrollY = typeof view.scrollY === "number" ? view.scrollY : -1
           root.open()
           root.layoutPageOpen = restoreLayout
+          scrollRestore.restart()
         })
       } else if (keepOpenRetries < 4) {
         // The flag write races the rebuild: the fresh instance can load
@@ -1806,6 +1937,53 @@ Panel {
   }
 
   property int keepOpenRetries: 0
+  property real pendingScrollY: -1
+
+  function pasteIntoSearch() {
+    if (searchPaste.running) return
+    searchPasteGen++
+    searchPaste.gen = searchPasteGen
+    searchPaste.running = true
+  }
+
+  property int searchPasteGen: 0
+
+  // Native Qt Quick paste does an unbounded synchronous Wayland read, so a
+  // hostile clipboard owner can stall the shell. Read with a size/time cap.
+  Process {
+    id: searchPaste
+    property int gen: 0
+    command: ["python3", root.runtimeStatePath, "paste"]
+    stdout: StdioCollector { id: searchPasteOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (searchPaste.gen !== root.searchPasteGen || !root.opened || !searchField.activeFocus) return
+      if (exitCode !== 0) return
+      var text = String(searchPasteOut.text || "")
+      if (text === "") return
+      if (searchField.selectionEnd > searchField.selectionStart)
+        searchField.remove(searchField.selectionStart, searchField.selectionEnd)
+      searchField.insert(searchField.cursorPosition, text)
+    }
+  }
+
+  // The list fills asynchronously after a rebuild, so retry until it is tall
+  // enough to hold the saved scroll offset.
+  Timer {
+    id: scrollRestore
+    interval: 120
+    repeat: true
+    property int tries: 0
+    onTriggered: {
+      if (root.pendingScrollY < 0) { stop(); return }
+      var max = Math.max(0, pluginList.contentHeight - pluginList.height)
+      if (pluginList.count > 0 && (max >= root.pendingScrollY || tries >= 15)) {
+        pluginList.contentY = Math.min(root.pendingScrollY, max)
+        root.pendingScrollY = -1
+        tries = 0
+        stop()
+      } else tries++
+    }
+  }
 
   Timer {
     id: keepOpenRetry
@@ -1830,6 +2008,8 @@ Panel {
   }
 
   function close() {
+    root.searchPasteGen++
+    if (searchPaste.running) searchPaste.running = false
     root.shortcutDialogOpen = false
     root.installDialogOpen = false
     root.settingsPageOpen = false
@@ -1879,20 +2059,22 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(560))
+    // Four drop columns need more room, while the fitted width remains capped
+    // by the available screen width in KeyboardPanel.
+    contentWidth: panel.fittedContentWidth(Style.space(700))
     contentHeight: panel.fittedContentHeight(Style.space(720))
 
     // ------------------------------------------------------------------- content
 
     // Persistent app header: sits above every page (main, updates, remove).
-    Rectangle {
+    // Plain Item (no background rect) so the popup card background renders once.
+    Item {
       id: appHeader
       anchors.top: parent.top
       anchors.left: parent.left
       anchors.right: parent.right
       height: appHeaderColumn.implicitHeight + Style.space(16)
       z: 6000
-      color: root.panelBackground
 
       ColumnLayout {
         id: appHeaderColumn
@@ -1916,7 +2098,7 @@ Panel {
             horizontalAlignment: Text.AlignHCenter
             verticalAlignment: Text.AlignVCenter
             text: root.iconFor("omaplug") || "\udb85\udcd9"
-            color: Style.selectedStateColor(root.contentForeground, Color.accent)
+            color: root.contentForeground
             font.family: root.contentFontFamily
             font.pixelSize: Style.space(34)
             font.bold: true
@@ -1946,7 +2128,7 @@ Panel {
                 tooltipText: "Open the Omarchy plugin marketplace"
                 bordered: true
                 foreground: root.contentForeground
-                accent: Color.accent
+                accent: Commons.Color.accent
                 fontFamily: root.contentFontFamily
                 fontSize: Style.font.caption
                 horizontalPadding: Style.space(8)
@@ -1961,7 +2143,7 @@ Panel {
                 tooltipText: "Clear the QML cache and restart the shell so every plugin reloads from source"
                 bordered: true
                 foreground: root.contentForeground
-                accent: Color.accent
+                accent: Commons.Color.accent
                 fontFamily: root.contentFontFamily
                 fontSize: Style.font.caption
                 horizontalPadding: Style.space(8)
@@ -1974,7 +2156,7 @@ Panel {
             Label {
               text: root.headerSummary
               textFormat: Text.PlainText
-              color: Qt.darker(root.contentForeground, 1.5)
+              color: root.contentForeground
               font.family: root.contentFontFamily
               font.pixelSize: Style.font.bodySmall
               Layout.fillWidth: true
@@ -1989,13 +2171,14 @@ Panel {
       anchors.fill: parent
       clip: true
       anchors.topMargin: appHeader.height
-      // The updates page (z: 5000, below) is a full overlay, not a child of
-      // this Item, so painting/input here would otherwise carry on
-      // underneath it - visible through any transparency in panelBackground,
-      // and still clickable through any gap the overlay's own MouseArea
-      // misses. Hiding this Item outright while that page is open removes
-      // both problems at the source instead of only blocking clicks.
-      visible: !root.updatesPageOpen
+      // The overlay pages (updates/settings/layout, z: 5000, below) are full
+      // overlays, not children of this Item, so painting/input here would
+      // otherwise carry on underneath them - visible through the now
+      // background-free pages, and still clickable through any gap the
+      // overlay's own MouseArea misses. Hiding this Item outright while any
+      // page is open removes both problems at the source instead of only
+      // blocking clicks.
+      visible: !root.updatesPageOpen && !root.settingsPageOpen && !root.layoutPageOpen
 
       MouseArea {
         anchors.fill: parent
@@ -2035,7 +2218,7 @@ Panel {
             tooltipText: "Select plugins to remove"
             enabled: !root.removingPlugin
             foreground: root.contentForeground
-            accent: Color.accent
+            accent: Commons.Color.accent
             fontFamily: root.contentFontFamily
             fontSize: Style.font.bodySmall
             horizontalPadding: Style.space(10)
@@ -2051,9 +2234,9 @@ Panel {
             tooltipText: root.checkingUpdates ? "Checking for updates…" : "Check updates"
             enabled: !root.checkingUpdates && !root.updateDetachedRunning
             foreground: root.checkingUpdates
-              ? Color.muted
+              ? Commons.Color.muted
               : root.contentForeground
-            accent: Color.accent
+            accent: Commons.Color.accent
             iconSpinning: root.checkingUpdates
             // Keep the glyph's visual center stable while it spins and make
             // the disabled state unmistakable against bright themes.
@@ -2073,7 +2256,7 @@ Panel {
             iconText: ""
             tooltipText: "Arrange bar layout"
             foreground: root.contentForeground
-            accent: Color.accent
+            accent: Commons.Color.accent
             fontFamily: root.contentFontFamily
             fontSize: Style.font.bodySmall
             horizontalPadding: Style.space(10)
@@ -2085,7 +2268,7 @@ Panel {
             iconText: "󱓖"
             tooltipText: "Install plugin"
             foreground: root.contentForeground
-            accent: Color.accent
+            accent: Commons.Color.accent
             fontFamily: root.contentFontFamily
             fontSize: Style.font.bodySmall
             horizontalPadding: Style.space(10)
@@ -2097,12 +2280,44 @@ Panel {
             iconText: "\uf013"
             tooltipText: "Settings"
             foreground: root.contentForeground
-            accent: Color.accent
+            accent: Commons.Color.accent
             fontFamily: root.contentFontFamily
             fontSize: Style.font.bodySmall
             horizontalPadding: Style.space(10)
             verticalPadding: Style.space(5)
             onClicked: root.settingsPageOpen = true
+          }
+        }
+
+        // Shown instead of stale badges: a failed catalog fetch leaves the
+        // last good map in place, so without this the rows would keep
+        // presenting outdated verification state as current.
+        RowLayout {
+          Layout.fillWidth: true
+          spacing: Style.space(8)
+          visible: root.marketplaceFetchFailed
+
+          Label {
+            text: "Marketplace unavailable \u2014 verification badges may be stale."
+            textFormat: Text.PlainText
+            color: Qt.hsla(0.12, 0.75, 0.55, 1)
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.bodySmall
+            Layout.fillWidth: true
+          }
+
+          Button {
+            text: "Retry"
+            tooltipText: "Fetch the marketplace catalog again"
+            bordered: true
+            enabled: !root.marketplaceFetching
+            foreground: root.contentForeground
+            accent: Commons.Color.accent
+            fontFamily: root.contentFontFamily
+            fontSize: Style.font.bodySmall
+            horizontalPadding: Style.space(12)
+            verticalPadding: Style.space(5)
+            onClicked: root.fetchMarketplace()
           }
         }
 
@@ -2123,7 +2338,7 @@ Panel {
             foreground: root.contentForeground
             background: root.panelBackground
             popupBorder: Util.alpha(root.contentForeground, 0.2)
-            accent: Color.accent
+            accent: Commons.Color.accent
             fontFamily: root.contentFontFamily
             onChanged: function(v) { root.filterMode = parseInt(v) }
           }
@@ -2137,7 +2352,7 @@ Panel {
             foreground: root.contentForeground
             background: root.panelBackground
             popupBorder: Util.alpha(root.contentForeground, 0.2)
-            accent: Color.accent
+            accent: Commons.Color.accent
             fontFamily: root.contentFontFamily
             onChanged: function(v) { root.filterKind = v }
           }
@@ -2148,10 +2363,27 @@ Panel {
             placeholderText: "Search plugins…"
             placeholderTextColor: Util.alpha(root.contentForeground, 0.45)
             foreground: root.contentForeground
-            accent: Color.accent
+            accent: Commons.Color.accent
             font.family: root.contentFontFamily
             text: root.searchText
             onTextChanged: root.searchText = text
+            // Replace native paste (unbounded synchronous Wayland read) with
+            // the capped reader; accept here so the TextField never sees it.
+            Keys.priority: Keys.BeforeItem
+            Keys.onPressed: function(event) {
+              if ((event.key === Qt.Key_V && (event.modifiers & Qt.ControlModifier))
+                  || (event.key === Qt.Key_Insert && (event.modifiers & Qt.ShiftModifier))) {
+                event.accepted = true
+                root.pasteIntoSearch()
+              }
+            }
+            MouseArea {
+              anchors.fill: parent
+              z: 1
+              acceptedButtons: Qt.MiddleButton
+              cursorShape: Qt.IBeamCursor
+              onPressed: root.pasteIntoSearch()
+            }
             Keys.onEscapePressed: { root.close() }
           }
         }
@@ -2162,6 +2394,8 @@ Panel {
           Layout.fillHeight: true
           clip: true
           spacing: 0
+          boundsBehavior: Flickable.StopAtBounds
+          boundsMovement: Flickable.StopAtBounds
           model: root.visibleRows
           ScrollBar.vertical: ScrollBar {
             policy: ScrollBar.AsNeeded
@@ -2174,6 +2408,56 @@ Panel {
             }
           }
 
+          // Qt's default notch is three text lines, less than one omaplug
+          // row. On Wayland a mouse also reports a small pixelDelta, so the
+          // notch step comes from angleDelta first; pixelDelta is only the
+          // touchpad fallback. Rows vary in height, so the step uses the
+          // list's average row height, not a fixed minimum. Discrete notches
+          // animate briefly; touchpad deltas stay immediate.
+          // Browser-like wheel scrolling for both discrete mice and high-res
+          // continuous wheels (e.g. Logitech MX Master). High-res mice report
+          // angleDelta in fractional units (e.g. 1..15) without pixelDelta.
+          // Scale angleDelta so 120 units (one full notch) scrolls ~4 rows.
+          WheelHandler {
+            acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+            onWheel: function(event) {
+              var touchpad = event.device && event.device.type === PointerDevice.TouchPad
+              var row = pluginList.count > 0 ? pluginList.contentHeight / pluginList.count : Style.space(81)
+              var delta = 0
+              if (touchpad && event.pixelDelta.y !== 0) {
+                delta = event.pixelDelta.y
+              } else if (event.angleDelta.y !== 0) {
+                // ~1.15 rows per 120 units (one standard notch)
+                delta = (event.angleDelta.y / 120) * (row * 1.15)
+              } else if (event.pixelDelta.y !== 0) {
+                delta = event.pixelDelta.y * 1.1
+              }
+              if (delta === 0) return
+              pluginList.cancelFlick()
+              var limit = Math.max(0, pluginList.contentHeight - pluginList.height)
+              var current = pluginScroll.running ? pluginScroll.targetY : pluginList.contentY
+              if ((current <= 0 && delta > 0) || (current >= limit && delta < 0)) {
+                event.accepted = true
+                return
+              }
+              var targetY = Math.max(0, Math.min(limit, current - delta))
+              pluginScroll.targetY = targetY
+              pluginScroll.restart()
+              event.accepted = true
+            }
+          }
+
+          SmoothedAnimation {
+            id: pluginScroll
+            target: pluginList
+            property: "contentY"
+            property real targetY: pluginList.contentY
+            to: targetY
+            velocity: -1
+            maximumEasingTime: 120
+            reversingMode: SmoothedAnimation.Immediate
+          }
+
           delegate: Plugin.Row {
             id: pluginRow
 
@@ -2182,6 +2466,7 @@ Panel {
             marketplaceEntry: pluginRow.modelData.firstParty
               ? null
               : (root.marketplaceMap[String(pluginRow.modelData.id)] || null)
+            marketplaceUnavailable: !pluginRow.modelData.firstParty && root.marketplaceFetchFailed
             localCommit: root.pluginCommits[String(pluginRow.modelData.sourceKey)] || ""
             repoUrl: root.pluginRepos[String(pluginRow.modelData.sourceKey)] || ""
             repoKnown: root.pluginRepos[String(pluginRow.modelData.sourceKey)] !== undefined
@@ -2202,6 +2487,10 @@ Panel {
             }
             onEnabledChangeRequested: function(pluginId, enabled) {
               root.setPluginEnabled(pluginId, enabled)
+            }
+            onOpenPanelRequested: function(pluginId) {
+              Quickshell.execDetached(["omarchy-shell", "shell", "summon", pluginId, "{}"])
+              root.close()
             }
             onOpenUrlRequested: function(url) { Qt.openUrlExternally(url) }
             onSourceRequested: function(sourceKey) { root.openPluginRepo(sourceKey) }
@@ -2231,7 +2520,7 @@ Panel {
             textFormat: Text.PlainText
             color: root.checkingUpdates
               ? Qt.darker(root.contentForeground, 1.5)
-              : Style.selectedStateColor(root.contentForeground, Color.accent)
+              : Style.selectedStateColor(root.contentForeground, Commons.Color.accent)
             font.family: root.contentFontFamily
             font.pixelSize: Style.font.bodySmall
           }
@@ -2240,7 +2529,7 @@ Panel {
             visible: root.removeSummary !== ""
             text: root.removeSummary
             textFormat: Text.PlainText
-            color: Style.selectedStateColor(root.contentForeground, Color.accent)
+            color: Style.selectedStateColor(root.contentForeground, Commons.Color.accent)
             font.family: root.contentFontFamily
             font.pixelSize: Style.font.bodySmall
           }
@@ -2249,7 +2538,7 @@ Panel {
             visible: root.moveSummary !== ""
             text: root.moveSummary
             textFormat: Text.PlainText
-            color: Style.selectedStateColor(root.contentForeground, Color.accent)
+            color: Style.selectedStateColor(root.contentForeground, Commons.Color.accent)
             font.family: root.contentFontFamily
             font.pixelSize: Style.font.bodySmall
           }
@@ -2263,12 +2552,32 @@ Panel {
             text: "Remove selected (" + root.selectedRemoveCount + ")"
             enabled: !root.removingPlugin
             foreground: root.contentForeground
-            accent: Color.urgent
+            accent: Commons.Color.urgent
             fontFamily: root.contentFontFamily
             fontSize: Style.font.bodySmall
             horizontalPadding: Style.space(12)
             verticalPadding: Style.space(6)
             onClicked: root.removeSelected()
+          }
+
+          Button {
+            id: updateAllButton
+            iconText: "\uf021"
+            text: root.updateAllHeaderText
+            tooltipText: root.updateAllHeaderTooltip
+            bordered: true
+            enabled: !root.checkingUpdates && !root.updateDetachedRunning
+              && root.bulkUpdateReady
+              && (root.bulkUpdateKeys.length > 0 || !root.updateCheckHasRun)
+            foreground: root.contentForeground
+            accent: Commons.Color.accent
+            iconSpinning: root.checkingUpdates || root.updateDetachedRunning
+            iconSize: Style.font.body
+            fontFamily: root.contentFontFamily
+            fontSize: Style.font.bodySmall
+            horizontalPadding: Style.space(12)
+            verticalPadding: Style.space(5)
+            onClicked: root.updateEverything()
           }
         }
       }
@@ -2416,9 +2725,9 @@ Panel {
         : "\"" + (root.removePending.length === 1 ? root.removePending[0] : "") + "\" will be deleted from your config. This cannot be undone."
       confirmText: "Remove"
       dismissEnabled: !root.removingPlugin
-      borderColor: Color.urgent
-      confirmForeground: Color.urgent
-      confirmAccent: Color.urgent
+      borderColor: Commons.Color.urgent
+      confirmForeground: Commons.Color.urgent
+      confirmAccent: Commons.Color.urgent
       confirmBordered: true
       titleWrapMode: Text.WordWrap
       foreground: root.contentForeground
@@ -2457,6 +2766,7 @@ Panel {
       foreground: root.contentForeground
       fontFamily: root.contentFontFamily
       panelBackground: root.panelBackground
+      runtimeStatePath: root.runtimeStatePath
 
       onCloseRequested: root.installDialogOpen = false
       onInstallRequested: function(rawUrl) { root.requestInstall(rawUrl) }
@@ -2470,8 +2780,8 @@ Panel {
       title: "Install plugin?"
       message: "Review the source before enabling this plugin. It will be installed disabled."
       confirmText: "Install"
-      confirmAccent: Color.urgent
-      confirmForeground: Color.urgent
+      confirmAccent: Commons.Color.urgent
+      confirmForeground: Commons.Color.urgent
       maximumWidth: Style.space(380)
       titleWrapMode: Text.WordWrap
       pluginName: root.installReviewEntry() ? (root.installReviewEntry().name || root.installPendingUrl.split("/").pop()) : root.installPendingUrl.split("/").pop()

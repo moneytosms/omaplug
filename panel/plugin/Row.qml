@@ -4,6 +4,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "../Presentation.js" as Presentation
 
@@ -14,6 +15,7 @@ Item {
   required property int index
   required property int rowCount
   required property var marketplaceEntry
+  required property bool marketplaceUnavailable
   required property string localCommit
   required property string repoUrl
   required property bool repoKnown
@@ -31,6 +33,7 @@ Item {
 
   signal removalSelectionRequested(string pluginId)
   signal enabledChangeRequested(string pluginId, bool enabled)
+  signal openPanelRequested(string pluginId)
   signal openUrlRequested(string url)
   signal sourceRequested(string sourceKey)
   signal updateRequested(string sourceKey)
@@ -45,6 +48,9 @@ Item {
     (!verified && marketplaceEntry.snapshotStatus === "update-unverified")
     || (marketplaceEntry.verified === true && commitKnown && !commitMatches))
   readonly property string authorUrl: modelData.firstParty ? "" : Presentation.authorUrl(repoUrl)
+  readonly property string basedOnAuthor: String(modelData.basedOnAuthor || "")
+  readonly property string basedOnUrl: modelData.firstParty ? ""
+    : Presentation.normalizedGitHubUrl(modelData.basedOnUrl)
   readonly property string kindLabel: Presentation.kindLabel(modelData.kinds, knownKinds)
 
   height: card.height + Style.space(9)
@@ -57,7 +63,7 @@ Item {
     clip: true
     radius: Style.cornerRadius > 0 ? Style.cornerRadius : 4
     color: hover.hovered
-      ? Style.hoverFillFor(pluginRow.foreground, Color.accent)
+      ? Style.hoverFillFor(pluginRow.foreground, Commons.Color.accent)
       : "transparent"
 
     RowLayout {
@@ -77,7 +83,7 @@ Item {
         enabled: !pluginRow.removingPlugin
         Layout.alignment: Qt.AlignVCenter
         foreground: pluginRow.foreground
-        accent: Color.accent
+        accent: Commons.Color.accent
         fontFamily: pluginRow.fontFamily
         fontSize: Style.font.bodySmall
         horizontalPadding: Style.space(6)
@@ -113,7 +119,7 @@ Item {
           width: 8
           height: 8
           radius: 4
-          color: Color.accent
+          color: Commons.Color.accent
           border.color: pluginRow.foreground
           border.width: 1
           z: 1
@@ -156,7 +162,7 @@ Item {
             elide: Label.ElideRight
 
             // Full name only when elided · matches author/ListingLinks ToolTip style.
-            ToolTip.text: truncated ? text : ""
+            ToolTip.text: truncated ? Presentation.tooltipText(text) : ""
             ToolTip.visible: nameHover.hovered && truncated
             ToolTip.delay: 400
 
@@ -167,7 +173,7 @@ Item {
 
           Rectangle {
             id: verificationBadge
-            visible: pluginRow.listed
+            visible: pluginRow.listed || pluginRow.marketplaceUnavailable
             anchors.left: nameLabel.right
             anchors.leftMargin: nameRow.spacing
             anchors.verticalCenter: parent.verticalCenter
@@ -177,7 +183,7 @@ Item {
             color: pluginRow.updateUnverified
               ? Qt.rgba(0.85, 0.65, 0.13, 0.18)
               : pluginRow.verified
-                ? Util.alpha(Color.accent, 0.18)
+                ? Util.alpha(Commons.Color.accent, 0.18)
               : Qt.rgba(pluginRow.foreground.r, pluginRow.foreground.g, pluginRow.foreground.b, 0.08)
 
             Row {
@@ -186,17 +192,17 @@ Item {
               spacing: Style.space(3)
 
               Text {
-                visible: pluginRow.verified && !pluginRow.updateUnverified
+                visible: pluginRow.verified && !pluginRow.updateUnverified && !pluginRow.marketplaceUnavailable
                 text: "\uf058"
                 textFormat: Text.PlainText
-                color: Color.accent
+                color: Commons.Color.accent
                 font.family: pluginRow.fontFamily
                 font.pixelSize: Style.font.caption - 1
                 anchors.verticalCenter: parent.verticalCenter
               }
 
               Text {
-                visible: pluginRow.updateUnverified
+                visible: pluginRow.updateUnverified && !pluginRow.marketplaceUnavailable
                 text: "\uf071"
                 textFormat: Text.PlainText
                 color: Qt.hsla(0.12, 0.75, 0.55, 1)
@@ -206,10 +212,10 @@ Item {
               }
 
               Text {
-                text: pluginRow.updateUnverified ? "Update Unverified" : pluginRow.verified ? "Verified" : "Unverified"
+                text: pluginRow.marketplaceUnavailable ? "Unavailable" : pluginRow.updateUnverified ? "Update Unverified" : pluginRow.verified ? "Verified" : "Unverified"
                 textFormat: Text.PlainText
                 color: pluginRow.updateUnverified ? Qt.hsla(0.12, 0.75, 0.55, 1)
-                  : pluginRow.verified ? Color.accent
+                  : pluginRow.verified ? Commons.Color.accent
                   : Qt.darker(pluginRow.foreground, 2.0)
                 font.family: pluginRow.fontFamily
                 font.pixelSize: Style.font.caption - 1
@@ -247,7 +253,7 @@ Item {
           maximumLineCount: 2
           elide: Label.ElideRight
 
-          ToolTip.text: truncated ? text : ""
+          ToolTip.text: truncated ? Presentation.tooltipText(text) : ""
           ToolTip.visible: descriptionHover.hovered && truncated
           ToolTip.delay: 400
 
@@ -266,12 +272,12 @@ Item {
             Layout.minimumWidth: 0
             elide: Text.ElideRight
             textFormat: Text.PlainText
-            color: pluginRow.authorUrl !== "" ? Color.accent : Qt.darker(pluginRow.foreground, 2.0)
+            color: pluginRow.authorUrl !== "" ? Commons.Color.accent : Qt.darker(pluginRow.foreground, 2.0)
             font.family: pluginRow.fontFamily
             font.pixelSize: Style.font.caption
             font.underline: authorHover.hovered && pluginRow.authorUrl !== ""
 
-            ToolTip.text: pluginRow.authorUrl !== "" ? pluginRow.authorUrl : ("by " + pluginRow.modelData.author)
+            ToolTip.text: Presentation.tooltipText(pluginRow.authorUrl !== "" ? pluginRow.authorUrl : ("by " + pluginRow.modelData.author))
             ToolTip.visible: authorHover.hovered
             ToolTip.delay: 400
 
@@ -285,6 +291,33 @@ Item {
               enabled: pluginRow.authorUrl !== ""
               cursorShape: Qt.PointingHandCursor
               onClicked: pluginRow.openUrlRequested(pluginRow.authorUrl)
+            }
+          }
+
+          Text {
+            visible: pluginRow.basedOnAuthor !== "" && pluginRow.basedOnUrl !== ""
+            text: "· based on " + pluginRow.basedOnAuthor + " ↗"
+            Layout.minimumWidth: 0
+            elide: Text.ElideRight
+            textFormat: Text.PlainText
+            color: Commons.Color.accent
+            font.family: pluginRow.fontFamily
+            font.pixelSize: Style.font.caption
+            font.underline: basedOnHover.hovered
+
+            ToolTip.text: pluginRow.basedOnUrl
+            ToolTip.visible: basedOnHover.hovered
+            ToolTip.delay: 400
+
+            HoverHandler {
+              id: basedOnHover
+              cursorShape: Qt.PointingHandCursor
+            }
+
+            MouseArea {
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              onClicked: pluginRow.openUrlRequested(pluginRow.basedOnUrl)
             }
           }
 
@@ -338,6 +371,9 @@ Item {
         fontFamily: pluginRow.fontFamily
         onEnabledChangeRequested: function(enabled) {
           pluginRow.enabledChangeRequested(pluginRow.modelData.id, enabled)
+        }
+        onOpenPanelRequested: function(pluginId) {
+          pluginRow.openPanelRequested(pluginId)
         }
         onSourceRequested: function(sourceKey) { pluginRow.sourceRequested(sourceKey) }
         onUpdateRequested: function(sourceKey) { pluginRow.updateRequested(sourceKey) }
